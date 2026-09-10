@@ -1,0 +1,8 @@
+# Reference list of users: one identity per line.
+# Several addresses on one line all designate the same person; the first one
+# is used when the account has to be created.
+# Blank lines and everything after `#` are ignored.
+
+alice@example.com
+bob@example.com, bob.smith@old-company.com
+carol@example.com carol.doe@example.org   # renamed after her wedding
