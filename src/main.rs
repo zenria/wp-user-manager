@@ -1,3 +1,4 @@
+mod aliases;
 mod cli;
 mod commands;
 mod prompt;
@@ -30,6 +31,7 @@ async fn run(cli: &Cli) -> anyhow::Result<()> {
     let global = &cli.global;
     match &cli.command {
         Command::ListReference => commands::list_reference(global),
+        Command::ListAliases => commands::list_aliases(global),
         Command::ListUsers => commands::list_users(global).await,
         Command::Status => commands::status(global).await,
         Command::ListMissing => commands::list_missing(global).await,

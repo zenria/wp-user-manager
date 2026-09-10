@@ -1,15 +1,17 @@
-//! Parsing of the reference file: the source of truth for which users should
+//! Parsing of the reference file: the source of truth for which users must
 //! exist in WordPress.
 //!
-//! Format: one *identity* per line. A line may hold several e-mail addresses
-//! (separated by whitespace, `,` or `;`) that all designate the same person.
-//! The first address of a line is the primary one, used when the user has to
-//! be created. Blank lines and `#` comments are ignored.
+//! Format: one address per line — one line, one user. Blank lines and `#`
+//! comments are ignored. Alternative addresses of the same person do *not*
+//! belong here: they live in the alias file (see `aliases.rs`), which only
+//! maps addresses to one another.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+
+use crate::aliases::AliasMap;
 
 #[derive(Debug, Error)]
 pub enum ReferenceError {
@@ -21,11 +23,26 @@ pub enum ReferenceError {
     },
     #[error("line {line}: `{value}` is not a valid e-mail address")]
     InvalidEmail { line: usize, value: String },
+    #[error(
+        "line {line}: several addresses on one line (`{value}`); the reference file takes \
+         one address per line, declare alternative addresses in the alias file"
+    )]
+    SeveralEmails { line: usize, value: String },
     #[error("line {line}: e-mail `{value}` is already listed on line {first_line}")]
     DuplicateEmail {
         line: usize,
         first_line: usize,
         value: String,
+    },
+    #[error(
+        "line {line}: `{value}` is an alias of `{other}` (line {first_line}); the same person \
+         must be listed only once"
+    )]
+    AliasOfAnotherEntry {
+        line: usize,
+        first_line: usize,
+        value: String,
+        other: String,
     },
     #[error("reference file `{path}` does not contain any e-mail address")]
     Empty { path: PathBuf },
@@ -99,35 +116,40 @@ fn is_plausible_email(value: &str) -> bool {
         && value.matches('@').count() == 1
 }
 
-/// One person, possibly known under several e-mail addresses.
+/// One line of the reference file: one person who must exist in WordPress.
 #[derive(Debug, Clone)]
 pub struct Identity {
     /// 1-based line number in the reference file.
     pub line: usize,
-    /// Non-empty; the first entry is the primary address.
-    pub emails: Vec<Email>,
+    /// The address as listed; the one used if the account has to be created.
+    pub email: Email,
+    /// Key shared with every alias of this address (see `AliasMap`).
+    pub class: String,
 }
 
 impl Identity {
-    pub fn primary(&self) -> &Email {
-        &self.emails[0]
+    pub fn email(&self) -> &Email {
+        &self.email
     }
 
-    pub fn aliases(&self) -> &[Email] {
-        &self.emails[1..]
-    }
-
-    pub fn matches_key(&self, key: &str) -> bool {
-        self.emails.iter().any(|email| email.key() == key)
-    }
-
-    /// All addresses as written, for display.
-    pub fn display(&self) -> String {
-        self.emails
-            .iter()
-            .map(Email::raw)
-            .collect::<Vec<_>>()
-            .join(", ")
+    /// The address, plus its known aliases, for display.
+    pub fn display(&self, aliases: &AliasMap) -> String {
+        match aliases.group_of(self.email.key()) {
+            None => self.email.raw().to_string(),
+            Some(group) => {
+                let others: Vec<&str> = group
+                    .emails
+                    .iter()
+                    .filter(|email| email.key() != self.email.key())
+                    .map(Email::raw)
+                    .collect();
+                if others.is_empty() {
+                    self.email.raw().to_string()
+                } else {
+                    format!("{}  (aliases: {})", self.email.raw(), others.join(", "))
+                }
+            }
+        }
     }
 }
 
@@ -138,12 +160,16 @@ pub struct Reference {
 }
 
 impl Reference {
-    pub fn load(path: &Path, normalizer: &Normalizer) -> Result<Self, ReferenceError> {
+    pub fn load(
+        path: &Path,
+        normalizer: &Normalizer,
+        aliases: &AliasMap,
+    ) -> Result<Self, ReferenceError> {
         let content = std::fs::read_to_string(path).map_err(|source| ReferenceError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        let identities = parse(&content, normalizer)?;
+        let identities = parse(&content, normalizer, aliases)?;
         if identities.is_empty() {
             return Err(ReferenceError::Empty {
                 path: path.to_path_buf(),
@@ -154,15 +180,16 @@ impl Reference {
             identities,
         })
     }
-
-    pub fn email_count(&self) -> usize {
-        self.identities.iter().map(|i| i.emails.len()).sum()
-    }
 }
 
-pub fn parse(content: &str, normalizer: &Normalizer) -> Result<Vec<Identity>, ReferenceError> {
-    let mut identities = Vec::new();
-    // normalized key -> line where it was first seen
+pub fn parse(
+    content: &str,
+    normalizer: &Normalizer,
+    aliases: &AliasMap,
+) -> Result<Vec<Identity>, ReferenceError> {
+    let mut identities: Vec<Identity> = Vec::new();
+    // class key -> index in `identities`, to catch a person listed twice
+    // (directly, or through one of their aliases).
     let mut seen: HashMap<String, usize> = HashMap::new();
 
     for (index, raw_line) in content.lines().enumerate() {
@@ -172,27 +199,44 @@ pub fn parse(content: &str, normalizer: &Normalizer) -> Result<Vec<Identity>, Re
             continue;
         }
 
-        let mut emails = Vec::new();
-        for token in text.split([',', ';', ' ', '\t']).filter(|t| !t.is_empty()) {
-            let email =
-                Email::new(token, normalizer).ok_or_else(|| ReferenceError::InvalidEmail {
-                    line,
-                    value: token.to_string(),
-                })?;
-            if let Some(&first_line) = seen.get(email.key()) {
-                return Err(ReferenceError::DuplicateEmail {
-                    line,
-                    first_line,
-                    value: email.raw().to_string(),
-                });
-            }
-            seen.insert(email.key().to_string(), line);
-            emails.push(email);
+        let mut tokens = text.split([',', ';', ' ', '\t']).filter(|t| !t.is_empty());
+        let token = match tokens.next() {
+            Some(token) => token,
+            None => continue,
+        };
+        if tokens.next().is_some() {
+            return Err(ReferenceError::SeveralEmails {
+                line,
+                value: text.to_string(),
+            });
         }
 
-        if !emails.is_empty() {
-            identities.push(Identity { line, emails });
+        let email = Email::new(token, normalizer).ok_or_else(|| ReferenceError::InvalidEmail {
+            line,
+            value: token.to_string(),
+        })?;
+        let class = aliases.class_of(email.key()).to_string();
+
+        if let Some(&first) = seen.get(&class) {
+            let previous = &identities[first];
+            return Err(if previous.email.key() == email.key() {
+                ReferenceError::DuplicateEmail {
+                    line,
+                    first_line: previous.line,
+                    value: email.raw().to_string(),
+                }
+            } else {
+                ReferenceError::AliasOfAnotherEntry {
+                    line,
+                    first_line: previous.line,
+                    value: email.raw().to_string(),
+                    other: previous.email.raw().to_string(),
+                }
+            });
         }
+
+        seen.insert(class.clone(), identities.len());
+        identities.push(Identity { line, email, class });
     }
 
     Ok(identities)
@@ -202,41 +246,39 @@ pub fn parse(content: &str, normalizer: &Normalizer) -> Result<Vec<Identity>, Re
 mod tests {
     use super::*;
 
-    fn plain() -> Normalizer {
-        Normalizer::default()
+    fn no_aliases() -> AliasMap {
+        AliasMap::empty()
+    }
+
+    fn alias_map(content: &str) -> AliasMap {
+        AliasMap::parse(content, &Normalizer::default()).unwrap()
+    }
+
+    fn parse_with(content: &str, aliases: &AliasMap) -> Result<Vec<Identity>, ReferenceError> {
+        parse(content, &Normalizer::default(), aliases)
     }
 
     #[test]
-    fn parses_one_identity_per_line() {
-        let identities = parse("a@example.com\nb@example.com\n", &plain()).unwrap();
+    fn reads_one_identity_per_line() {
+        let identities = parse_with("a@example.com\nb@example.com\n", &no_aliases()).unwrap();
         assert_eq!(identities.len(), 2);
-        assert_eq!(identities[0].primary().raw(), "a@example.com");
+        assert_eq!(identities[0].email().raw(), "a@example.com");
         assert_eq!(identities[1].line, 2);
     }
 
     #[test]
-    fn groups_several_addresses_of_the_same_person() {
-        let identities = parse("a@example.com, a@other.com; a2@example.com\n", &plain()).unwrap();
-        assert_eq!(identities.len(), 1);
-        assert_eq!(identities[0].emails.len(), 3);
-        assert_eq!(identities[0].primary().raw(), "a@example.com");
-        assert_eq!(identities[0].aliases().len(), 2);
-        assert!(identities[0].matches_key("a2@example.com"));
-    }
-
-    #[test]
     fn ignores_blank_lines_and_comments() {
-        let content = "# header\n\n  a@example.com  # the boss\n\n";
-        let identities = parse(content, &plain()).unwrap();
+        let identities =
+            parse_with("# header\n\n  a@example.com  # the boss\n", &no_aliases()).unwrap();
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].line, 3);
     }
 
     #[test]
     fn compares_addresses_case_insensitively() {
-        let identities = parse("Alice@Example.COM\n", &plain()).unwrap();
-        assert_eq!(identities[0].primary().raw(), "Alice@Example.COM");
-        assert!(identities[0].matches_key("alice@example.com"));
+        let identities = parse_with("Alice@Example.COM\n", &no_aliases()).unwrap();
+        assert_eq!(identities[0].email().raw(), "Alice@Example.COM");
+        assert_eq!(identities[0].class, "alice@example.com");
     }
 
     #[test]
@@ -244,22 +286,61 @@ mod tests {
         let normalizer = Normalizer {
             strip_plus_tags: true,
         };
-        let identities = parse("alice+wp@example.com\n", &normalizer).unwrap();
-        assert!(identities[0].matches_key("alice@example.com"));
+        let identities = parse("alice+wp@example.com\n", &normalizer, &no_aliases()).unwrap();
+        assert_eq!(identities[0].class, "alice@example.com");
+    }
+
+    #[test]
+    fn shares_the_class_of_its_alias_group() {
+        let aliases = alias_map("a@example.com a@old.com\n");
+        let identities = parse_with("a@example.com\n", &aliases).unwrap();
+        assert_eq!(identities[0].class, aliases.class_of("a@old.com"));
+        assert_eq!(
+            identities[0].display(&aliases),
+            "a@example.com  (aliases: a@old.com)"
+        );
+    }
+
+    #[test]
+    fn an_alias_alone_is_not_a_reference_entry() {
+        let aliases = alias_map("a@example.com a@old.com\n");
+        let identities = parse_with("b@example.com\n", &aliases).unwrap();
+        assert_eq!(identities.len(), 1, "the alias file must not add entries");
+        assert_eq!(identities[0].email().raw(), "b@example.com");
+    }
+
+    #[test]
+    fn rejects_several_addresses_on_one_line() {
+        let err = parse_with("a@example.com, a@old.com\n", &no_aliases()).unwrap_err();
+        assert!(matches!(err, ReferenceError::SeveralEmails { line: 1, .. }));
     }
 
     #[test]
     fn rejects_invalid_addresses() {
-        let err = parse("not-an-email\n", &plain()).unwrap_err();
+        let err = parse_with("not-an-email\n", &no_aliases()).unwrap_err();
         assert!(matches!(err, ReferenceError::InvalidEmail { line: 1, .. }));
     }
 
     #[test]
-    fn rejects_the_same_address_on_two_lines() {
-        let err = parse("a@example.com\nb@example.com a@example.com\n", &plain()).unwrap_err();
+    fn rejects_the_same_address_twice() {
+        let err = parse_with("a@example.com\na@example.com\n", &no_aliases()).unwrap_err();
         assert!(matches!(
             err,
             ReferenceError::DuplicateEmail {
+                line: 2,
+                first_line: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_two_entries_that_are_aliases_of_each_other() {
+        let aliases = alias_map("a@example.com a@old.com\n");
+        let err = parse_with("a@example.com\na@old.com\n", &aliases).unwrap_err();
+        assert!(matches!(
+            err,
+            ReferenceError::AliasOfAnotherEntry {
                 line: 2,
                 first_line: 1,
                 ..

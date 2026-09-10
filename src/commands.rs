@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context as _, Result, anyhow};
 
+use crate::aliases::AliasMap;
 use crate::cli::{CreateArgs, DeleteArgs, GlobalArgs};
 use crate::prompt::{confirm, confirm_phrase};
 use crate::provision::new_user_for;
@@ -15,6 +16,7 @@ use crate::wp::{WpClient, WpUser};
 /// Everything the reconciling commands need: the reference file and a client.
 struct Session {
     reference: Reference,
+    aliases: AliasMap,
     client: WpClient,
     normalizer: Normalizer,
     protection: Protection,
@@ -28,11 +30,19 @@ pub fn normalizer(global: &GlobalArgs) -> Normalizer {
     }
 }
 
-pub fn load_reference(global: &GlobalArgs) -> Result<Reference> {
+/// The alias file is optional: without one, every address stands for itself.
+pub fn load_aliases(global: &GlobalArgs) -> Result<AliasMap> {
+    match global.aliases.as_ref() {
+        None => Ok(AliasMap::empty()),
+        Some(path) => Ok(AliasMap::load(path, &normalizer(global))?),
+    }
+}
+
+pub fn load_reference(global: &GlobalArgs, aliases: &AliasMap) -> Result<Reference> {
     let path = global.reference.as_ref().ok_or_else(|| {
         anyhow!("no reference file: pass --reference <FILE> or set WP_REFERENCE_FILE")
     })?;
-    Ok(Reference::load(path, &normalizer(global))?)
+    Ok(Reference::load(path, &normalizer(global), aliases)?)
 }
 
 fn client(global: &GlobalArgs) -> Result<WpClient> {
@@ -56,7 +66,8 @@ fn required<'a>(value: &'a Option<String>, flag: &str, env: &str) -> Result<&'a 
 }
 
 async fn open_session(global: &GlobalArgs) -> Result<Session> {
-    let reference = load_reference(global)?;
+    let aliases = load_aliases(global)?;
+    let reference = load_reference(global, &aliases)?;
     let client = client(global)?;
     let normalizer = normalizer(global);
 
@@ -70,33 +81,38 @@ async fn open_session(global: &GlobalArgs) -> Result<Session> {
         .context("could not list the WordPress users")?;
 
     // The account we authenticate with is always kept, on top of the
-    // explicitly protected ones.
+    // explicitly protected ones. Protection is expressed in classes, so an
+    // alias of a protected address is protected too.
     let mut protected: Vec<String> = global
         .protect
         .iter()
         .filter(|email| !email.trim().is_empty())
-        .map(|email| normalizer.normalize(email))
+        .map(|email| class_of(&aliases, &normalizer, email))
         .collect();
-    protected.push(normalizer.normalize(&me.email));
+    protected.push(class_of(&aliases, &normalizer, &me.email));
 
     let protection = Protection {
-        emails: protected,
+        classes: protected,
         keep_administrators: !global.delete_administrators,
     };
-    let plan = reconcile(&reference, &users, &normalizer, &protection);
+    let plan = reconcile(&reference, &users, &normalizer, &aliases, &protection);
 
     println!(
-        "Site      : {}\nAuthenticated as: {} <{}>\nReference : {} ({} identities, {} e-mails)",
+        "Site      : {}\nAuthenticated as: {} <{}>\nReference : {} ({} identities)\nAliases   : {}",
         global.wp_url.as_deref().unwrap_or("-"),
         me.username,
         me.email,
         reference.path.display(),
         reference.identities.len(),
-        reference.email_count(),
+        match aliases.path() {
+            Some(path) => format!("{} ({} groups)", path.display(), aliases.groups().len()),
+            None => "none (pass --aliases <FILE> to map alternative addresses)".to_string(),
+        },
     );
 
     Ok(Session {
         reference,
+        aliases,
         client,
         normalizer,
         protection,
@@ -106,10 +122,28 @@ async fn open_session(global: &GlobalArgs) -> Result<Session> {
 }
 
 pub fn list_reference(global: &GlobalArgs) -> Result<()> {
-    let reference = load_reference(global)?;
+    let aliases = load_aliases(global)?;
+    let reference = load_reference(global, &aliases)?;
     report::heading(&format!("Reference file {}", reference.path.display()));
-    report::identities_list(&reference.identities);
+    report::identities_list(&reference.identities, &aliases);
     Ok(())
+}
+
+pub fn list_aliases(global: &GlobalArgs) -> Result<()> {
+    let aliases = load_aliases(global)?;
+    let title = match aliases.path() {
+        Some(path) => format!("Alias file {}", path.display()),
+        None => "No alias file (pass --aliases <FILE> or set WP_ALIAS_FILE)".to_string(),
+    };
+    report::heading(&title);
+    report::alias_groups(aliases.groups());
+    Ok(())
+}
+
+/// Resolves a raw address to the key identifying its owner.
+fn class_of(aliases: &AliasMap, normalizer: &Normalizer, email: &str) -> String {
+    let key = normalizer.normalize(email);
+    aliases.class_of(&key).to_string()
 }
 
 pub async fn list_users(global: &GlobalArgs) -> Result<()> {
@@ -128,13 +162,13 @@ pub async fn status(global: &GlobalArgs) -> Result<()> {
     let plan = &session.plan;
 
     report::heading("Missing users (in the reference file, not in WordPress)");
-    report::identities_list(&plan.missing);
+    report::identities_list(&plan.missing, &session.aliases);
 
     report::heading("Surplus users (in WordPress, not in the reference file)");
     report::users_table(&plan.extra);
 
     report::protected_details(&plan.protected);
-    report::ambiguous_details(&plan.ambiguous);
+    report::ambiguous_details(&plan.ambiguous, &session.aliases);
     report::matched_details(plan, &session.normalizer);
     report::plan_summary(plan, &session.normalizer);
 
@@ -149,8 +183,8 @@ pub async fn status(global: &GlobalArgs) -> Result<()> {
 pub async fn list_missing(global: &GlobalArgs) -> Result<()> {
     let session = open_session(global).await?;
     report::heading("Missing users (to create)");
-    report::identities_list(&session.plan.missing);
-    report::ambiguous_details(&session.plan.ambiguous);
+    report::identities_list(&session.plan.missing, &session.aliases);
+    report::ambiguous_details(&session.plan.ambiguous, &session.aliases);
     Ok(())
 }
 
@@ -175,7 +209,7 @@ pub async fn delete_extra(global: &GlobalArgs, args: &DeleteArgs) -> Result<()> 
 pub async fn sync(global: &GlobalArgs, create: &CreateArgs, delete: &DeleteArgs) -> Result<()> {
     let session = open_session(global).await?;
     report::plan_summary(&session.plan, &session.normalizer);
-    report::ambiguous_details(&session.plan.ambiguous);
+    report::ambiguous_details(&session.plan.ambiguous, &session.aliases);
 
     create_from_session(&session, global, create).await?;
     delete_from_session(&session, global, delete).await
@@ -187,7 +221,7 @@ async fn create_from_session(
     args: &CreateArgs,
 ) -> Result<()> {
     report::heading("Users to create");
-    report::identities_list(&session.plan.missing);
+    report::identities_list(&session.plan.missing, &session.aliases);
     if session.plan.missing.is_empty() {
         return Ok(());
     }
@@ -287,7 +321,7 @@ async fn delete_from_session(
             Ok(()) => {
                 deleted += 1;
                 println!(
-                    "deleted id {:<6} {:<28} {}",
+                    "deleted id {:<6} {:<24} {}",
                     user.id, user.username, user.email
                 );
             }

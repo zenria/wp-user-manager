@@ -1,0 +1,14 @@
+# Alias mapping: one group per line, at least two addresses that designate the
+# same person. Separators: whitespace, `,` or `;`. Blank lines and `#`
+# comments are ignored.
+#
+# A group is a set: the order of the addresses carries no meaning, and neither
+# does the order of the lines. Groups sharing an address are merged.
+#
+# Listing an address here NEVER makes it a user to create: it only tells the
+# tool that a WordPress account registered under one of these addresses is the
+# person listed in the reference file.
+
+bob@example.com, bob.smith@old-company.com
+carol@example.com carol.doe@example.org        # renamed after her wedding
+dave@example.com dave@contractor.example       # two mailboxes, one person

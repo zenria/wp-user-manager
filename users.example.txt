@@ -1,8 +1,9 @@
-# Reference list of users: one identity per line.
-# Several addresses on one line all designate the same person; the first one
-# is used when the account has to be created.
+# Reference list: one e-mail address per line, one line per user.
 # Blank lines and everything after `#` are ignored.
+#
+# Alternative addresses of the same person do NOT belong here: declare them in
+# the alias file (see aliases.example.txt).
 
 alice@example.com
-bob@example.com, bob.smith@old-company.com
-carol@example.com carol.doe@example.org   # renamed after her wedding
+bob@example.com
+carol@example.com

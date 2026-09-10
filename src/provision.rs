@@ -18,7 +18,7 @@ pub fn new_user_for(
     role: &str,
     taken: &mut HashSet<String>,
 ) -> (NewUser, String) {
-    let email = identity.primary();
+    let email = identity.email();
     let base = sanitize_username(email.local_part());
     let username = unique_username(&base, taken);
     taken.insert(username.clone());
@@ -103,14 +103,17 @@ fn generate_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aliases::AliasMap;
     use crate::reference::{Normalizer, parse};
 
     fn identity(line: &str) -> Identity {
-        parse(line, &Normalizer::default()).unwrap().remove(0)
+        parse(line, &Normalizer::default(), &AliasMap::empty())
+            .unwrap()
+            .remove(0)
     }
 
     #[test]
-    fn derives_username_and_display_name_from_the_primary_email() {
+    fn derives_username_and_display_name_from_the_reference_email() {
         let mut taken = HashSet::new();
         let (user, _) = new_user_for(
             &identity("Jane.Doe@example.com\n"),

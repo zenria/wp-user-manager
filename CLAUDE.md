@@ -9,6 +9,13 @@ with a reference file listing e-mail addresses. It reports differences and,
 after an interactive confirmation, creates missing users and deletes surplus
 ones. Language of the code, comments, CLI output and documentation: **English**.
 
+Two input files, with two clearly separated roles — do not blur them:
+
+- the **reference file** is the only source of truth for *who must exist*: one
+  address per line, one line per user;
+- the **alias file** is only a *mapping* saying which addresses designate the
+  same person. An address listed there is never, by itself, a user to create.
+
 ## Commands
 
 ```sh
@@ -31,17 +38,26 @@ One module per concern, all in `src/`, no library crate:
 - `cli.rs` — the whole clap surface. Global options are `#[arg(global = true)]`
   with an `env = "WP_…"` fallback, so every option is also configurable via
   `.env`. Subcommand-specific options live in `CreateArgs` / `DeleteArgs`.
-- `reference.rs` — parses the reference file into `Identity` values. One line =
-  one person, possibly several e-mails (separators: whitespace, `,`, `;`;
-  `#` starts a comment). `Email` keeps the address as written (`raw()`) *and*
-  its comparison key (`key()`), produced by `Normalizer` (lowercase, plus
-  optional `+tag` stripping). Duplicate addresses across two lines are a hard
-  error: they would make matching ambiguous.
-- `reconcile.rs` — pure matching logic, no I/O. `reconcile()` returns a `Plan`
-  with `matched`, `ambiguous`, `missing`, `extra` and `protected`. This is
-  where the invariants live; it is the most valuable place for tests.
+- `reference.rs` — parses the reference file into `Identity` values (`line`,
+  `email`, `class`). One address per line; several addresses on a line is an
+  error pointing at the alias file. `Email` keeps the address as written
+  (`raw()`) *and* its comparison key (`key()`), produced by `Normalizer`
+  (lowercase, plus optional `+tag` stripping). `class` is the key resolved
+  through the alias map: it identifies the *person*. Two lines resolving to the
+  same class are a hard error (`DuplicateEmail`, `AliasOfAnotherEntry`).
+- `aliases.rs` — parses the alias file into `AliasMap`: equivalence classes over
+  addresses. A group needs at least two addresses (a lonely one is an error, it
+  usually means the reference list was pasted here). Order must never matter:
+  the canonical key of a group is the smallest normalized key of the set, and
+  lines sharing an address are merged as they are read. `class_of(key)` returns
+  the canonical key, or the key itself when unknown.
+- `reconcile.rs` — pure matching logic, no I/O. Both sides are compared on
+  their class, never on raw addresses. `reconcile()` returns a `Plan` with
+  `matched`, `ambiguous`, `missing`, `extra` and `protected`. This is where the
+  invariants live; it is the most valuable place for tests.
 - `provision.rs` — derives username, display name and a random password for a
-  user to be created; keeps usernames unique against those already taken.
+  user to be created (from the *reference* address, never from an alias); keeps
+  usernames unique against those already taken.
 - `wp.rs` — WordPress REST client (`/wp-json/wp/v2`). Basic auth with an
   application password (spaces stripped). `WpError` (thiserror) distinguishes
   transport, API (`code`/`message` from the JSON body) and 401.
@@ -65,13 +81,21 @@ the operation that failed), `thiserror` for the domain errors of `wp.rs` and
   user is always protected (`open_session`), administrators are protected
   unless `--delete-administrators` is passed, and `--protect` adds addresses.
 - **Ambiguous identities are never acted upon**, only reported.
-- E-mails are compared through `Normalizer::normalize`, never with `==` on raw
-  strings. Send the raw address to WordPress, compare on the key.
-- Every new behaviour of `reference.rs`, `reconcile.rs` or `provision.rs` gets
-  a unit test in the module's `mod tests`. `wp.rs` and `commands.rs` do I/O
+- **The alias file never adds or removes users**, it only redirects matching.
+  Any change making an alias behave like a reference entry is a bug.
+- **Nothing in the alias handling may depend on order** — neither the position
+  of an address on a line, nor the order of the lines. Keep the merge-on-read
+  logic and the "smallest key is canonical" rule, and keep the tests that
+  compare two parses of the same groups written in different orders.
+- E-mails are compared through `Normalizer::normalize` *then*
+  `AliasMap::class_of`, never with `==` on raw strings. Send the raw address to
+  WordPress, compare on the class.
+- Every new behaviour of `reference.rs`, `aliases.rs`, `reconcile.rs` or
+  `provision.rs` gets a unit test in the module's `mod tests`. `wp.rs` and `commands.rs` do I/O
   and are covered manually (see below).
 - Adding a global option means: a field in `GlobalArgs` with its `env`, a line
   in `.env.example`, and a row in the README table if it is a command.
+- Keep `users.example.txt` and `aliases.example.txt` in sync with the parsers.
 
 ## Manual testing against a mock WordPress
 
@@ -80,8 +104,9 @@ real site, run a small mock REST server (`users/me`, `GET/POST/DELETE
 wp/v2/users`, honouring `context=edit`, `per_page`/`page` with an
 `X-WP-TotalPages` header, and `force=true`/`reassign` on delete), then point
 the CLI at it with `WP_URL=http://127.0.0.1:<port>`. Worth checking:
-pagination beyond 100 users, alias matching, 401 mapping, the `delete`
-confirmation phrase, and the non-interactive abort.
+pagination beyond 100 users, matching an account registered under an alias
+(in both directions), 401 mapping, the `delete` confirmation phrase, and the
+non-interactive abort.
 
 ## WordPress API notes
 

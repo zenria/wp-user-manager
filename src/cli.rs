@@ -44,6 +44,10 @@ pub struct GlobalArgs {
     )]
     pub reference: Option<PathBuf>,
 
+    /// Alias file: one group of equivalent addresses per line (order-agnostic)
+    #[arg(short = 'a', long = "aliases", env = "WP_ALIAS_FILE", global = true)]
+    pub aliases: Option<PathBuf>,
+
     /// Treat `user+tag@host` as `user@host` when comparing addresses
     #[arg(long, env = "WP_STRIP_PLUS_TAGS", global = true)]
     pub strip_plus_tags: bool,
@@ -80,6 +84,9 @@ impl GlobalArgs {
 pub enum Command {
     /// Show the identities read from the reference file (no WordPress call)
     ListReference,
+
+    /// Show the alias groups read from the alias file (no WordPress call)
+    ListAliases,
 
     /// List the users of the WordPress site
     ListUsers,

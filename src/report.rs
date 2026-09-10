@@ -1,5 +1,6 @@
 //! Plain text rendering of users, identities and reconciliation plans.
 
+use crate::aliases::{AliasGroup, AliasMap};
 use crate::reconcile::{IdentityMatch, Plan};
 use crate::reference::{Identity, Normalizer};
 use crate::wp::WpUser;
@@ -31,26 +32,31 @@ pub fn users_table(users: &[WpUser]) {
     println!("\n{} user(s)", users.len());
 }
 
-pub fn identities_list(identities: &[Identity]) {
+pub fn identities_list(identities: &[Identity], aliases: &AliasMap) {
     if identities.is_empty() {
         println!("(none)");
         return;
     }
     for identity in identities {
-        let aliases = identity.aliases();
-        if aliases.is_empty() {
-            println!("line {:>4}  {}", identity.line, identity.primary().raw());
-        } else {
-            let aliases: Vec<&str> = aliases.iter().map(|email| email.raw()).collect();
-            println!(
-                "line {:>4}  {}  (also: {})",
-                identity.line,
-                identity.primary().raw(),
-                aliases.join(", ")
-            );
-        }
+        println!("line {:>4}  {}", identity.line, identity.display(aliases));
     }
     println!("\n{} identity/identities", identities.len());
+}
+
+pub fn alias_groups(groups: &[AliasGroup]) {
+    if groups.is_empty() {
+        println!("(none)");
+        return;
+    }
+    for group in groups {
+        let lines: Vec<String> = group.lines.iter().map(|line| line.to_string()).collect();
+        println!("line {:>4}  {}", lines.join("+"), group.display());
+    }
+    println!(
+        "\n{} alias group(s). These addresses are only mapped to one another; \
+         they are not users to create.",
+        groups.len()
+    );
 }
 
 pub fn plan_summary(plan: &Plan, normalizer: &Normalizer) {
@@ -82,20 +88,24 @@ pub fn matched_details(plan: &Plan, normalizer: &Normalizer) {
             ""
         };
         println!(
-            "{:>6}  {:<28}  {:<36}  <- line {}{}",
+            "{:>6}  {:<24}  {:<34}  <- line {}{}",
             user.id, user.username, user.email, entry.identity.line, marker
         );
     }
 }
 
-pub fn ambiguous_details(entries: &[IdentityMatch]) {
-    heading("Ambiguous identities (several WordPress accounts on one line)");
+pub fn ambiguous_details(entries: &[IdentityMatch], aliases: &AliasMap) {
+    heading("Ambiguous identities (several WordPress accounts for one person)");
     if entries.is_empty() {
         println!("(none)");
         return;
     }
     for entry in entries {
-        println!("line {}: {}", entry.identity.line, entry.identity.display());
+        println!(
+            "line {}: {}",
+            entry.identity.line,
+            entry.identity.display(aliases)
+        );
         for user in &entry.users {
             println!(
                 "    -> id {:<6} {:<24} {}",
@@ -105,7 +115,7 @@ pub fn ambiguous_details(entries: &[IdentityMatch]) {
     }
     println!(
         "\nNothing is created or deleted for these lines: merge the accounts in \
-         WordPress, or split the line."
+         WordPress, or split the alias group."
     );
 }
 
