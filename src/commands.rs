@@ -8,10 +8,10 @@ use crate::aliases::AliasMap;
 use crate::cli::{CreateArgs, DeleteArgs, GlobalArgs};
 use crate::prompt::{confirm, confirm_phrase};
 use crate::provision::new_user_for;
-use crate::reconcile::{Plan, Protection, reconcile};
-use crate::reference::{Normalizer, Reference};
+use crate::reconcile::{Plan, Protection, reconcile, users_for};
+use crate::reference::{Email, Identity, Normalizer, Reference};
 use crate::report;
-use crate::wp::{WpClient, WpUser};
+use crate::wp::{NewUser, WpClient, WpUser};
 
 /// Everything the reconciling commands need: the reference file and a client.
 struct Session {
@@ -199,6 +199,99 @@ pub async fn list_extra(global: &GlobalArgs) -> Result<()> {
 pub async fn create_missing(global: &GlobalArgs, args: &CreateArgs) -> Result<()> {
     let session = open_session(global).await?;
     create_from_session(&session, global, args).await
+}
+
+/// Creates a single user from an address given on the command line. The
+/// reference file is not required here: the address itself says who to create.
+pub async fn create_user(global: &GlobalArgs, email: &str, args: &CreateArgs) -> Result<()> {
+    let normalizer = normalizer(global);
+    let aliases = load_aliases(global)?;
+    let email = Email::new(email, &normalizer)
+        .ok_or_else(|| anyhow!("`{email}` is not a valid e-mail address"))?;
+    let identity = Identity::ad_hoc(email, &aliases);
+
+    let client = client(global)?;
+    let users = client
+        .list_users()
+        .await
+        .context("could not list the WordPress users")?;
+
+    report::heading("User to create");
+    println!("{}", identity.display(&aliases));
+
+    // An account may already exist under any address of the alias group.
+    let existing = users_for(&identity, &users, &normalizer, &aliases);
+    if !existing.is_empty() {
+        println!("\nThis person already has a WordPress account, nothing to create:");
+        report::users_table(&existing);
+        return Ok(());
+    }
+
+    // The reference file stays the source of truth for who must exist: an
+    // address missing from it would be listed as surplus by the next `sync`.
+    if let Some(path) = global.reference.as_ref() {
+        let reference = load_reference(global, &aliases)?;
+        if !reference
+            .identities
+            .iter()
+            .any(|other| other.class == identity.class)
+        {
+            println!(
+                "\nWarning: this address is not listed in the reference file {}.\n\
+                 Add it there, or `delete-extra` will propose the new account for deletion.",
+                path.display()
+            );
+        }
+    }
+
+    let question = format!(
+        "Create 1 user with role `{}` on {}?",
+        args.role,
+        global.wp_url.as_deref().unwrap_or("this site")
+    );
+    if !confirm(&question, global.yes)? {
+        println!("Aborted, nothing was created.");
+        return Ok(());
+    }
+
+    let mut taken: HashSet<String> = users
+        .iter()
+        .map(|user| user.username.to_lowercase())
+        .collect();
+    let (new_user, password) = new_user_for(&identity, &args.role, &mut taken);
+    let created = create_one(&client, &new_user, &password, args.show_passwords).await?;
+    if created && !args.show_passwords {
+        println!(
+            "The password was generated randomly and not displayed: ask the new user to \
+             go through the WordPress \"lost password\" flow (re-run with --show-passwords \
+             to print it)."
+        );
+    }
+    Ok(())
+}
+
+/// Creates one user and reports the outcome. Returns whether it was created.
+async fn create_one(
+    client: &WpClient,
+    new_user: &NewUser,
+    password: &str,
+    show_passwords: bool,
+) -> Result<bool> {
+    match client.create_user(new_user).await {
+        Ok(user) => {
+            let secret = if show_passwords {
+                format!("  password: {password}")
+            } else {
+                String::new()
+            };
+            println!(
+                "created id {:<6} {:<24} {}{}",
+                user.id, new_user.username, new_user.email, secret
+            );
+            Ok(true)
+        }
+        Err(error) => Err(anyhow!("could not create {} : {error}", new_user.email)),
+    }
 }
 
 pub async fn delete_extra(global: &GlobalArgs, args: &DeleteArgs) -> Result<()> {

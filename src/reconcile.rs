@@ -112,10 +112,30 @@ pub fn reconcile(
     plan
 }
 
+/// The WordPress users whose address designates the same person as
+/// `identity`. Comparison is on the class, so an account registered under an
+/// alias is found too. Used when acting on a single address instead of a whole
+/// reference file.
+pub fn users_for(
+    identity: &Identity,
+    users: &[WpUser],
+    normalizer: &Normalizer,
+    aliases: &AliasMap,
+) -> Vec<WpUser> {
+    users
+        .iter()
+        .filter(|user| {
+            let key = normalizer.normalize(&user.email);
+            aliases.class_of(&key) == identity.class
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::parse;
+    use crate::reference::{Email, parse};
     use std::path::PathBuf;
 
     fn aliases(content: &str) -> AliasMap {
@@ -253,6 +273,50 @@ mod tests {
         assert_eq!(plan.ambiguous.len(), 1);
         assert_eq!(plan.ambiguous[0].users.len(), 2);
         assert!(plan.extra.is_empty());
+    }
+
+    #[test]
+    fn finds_the_account_of_a_single_address_through_its_aliases() {
+        let normalizer = Normalizer::default();
+        let aliases = aliases("new@example.com old@legacy.com\n");
+        let email = Email::new("new@example.com", &normalizer).unwrap();
+        let identity = Identity::ad_hoc(email, &aliases);
+        let users = vec![
+            user(1, "old@legacy.com", &["subscriber"]),
+            user(2, "someone@example.com", &["subscriber"]),
+        ];
+
+        let found = users_for(&identity, &users, &normalizer, &aliases);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, 1);
+    }
+
+    #[test]
+    fn finds_nothing_when_the_single_address_has_no_account() {
+        let normalizer = Normalizer::default();
+        let aliases = AliasMap::empty();
+        let email = Email::new("Jane.Doe@example.com", &normalizer).unwrap();
+        let identity = Identity::ad_hoc(email, &aliases);
+        let users = vec![user(1, "someone@example.com", &["subscriber"])];
+
+        assert!(users_for(&identity, &users, &normalizer, &aliases).is_empty());
+    }
+
+    #[test]
+    fn reports_every_account_of_a_single_address() {
+        let normalizer = Normalizer::default();
+        let aliases = aliases("new@example.com old@legacy.com\n");
+        let email = Email::new("old@legacy.com", &normalizer).unwrap();
+        let identity = Identity::ad_hoc(email, &aliases);
+        let users = vec![
+            user(1, "new@example.com", &["subscriber"]),
+            user(2, "old@legacy.com", &["subscriber"]),
+        ];
+
+        let found = users_for(&identity, &users, &normalizer, &aliases);
+
+        assert_eq!(found.len(), 2);
     }
 
     #[test]

@@ -37,6 +37,7 @@ async fn run(cli: &Cli) -> anyhow::Result<()> {
         Command::ListMissing => commands::list_missing(global).await,
         Command::ListExtra => commands::list_extra(global).await,
         Command::CreateMissing(args) => commands::create_missing(global, args).await,
+        Command::CreateUser(args) => commands::create_user(global, &args.email, &args.create).await,
         Command::DeleteExtra(args) => commands::delete_extra(global, args).await,
         Command::Sync(args) => commands::sync(global, &args.create, &args.delete).await,
     }

@@ -119,7 +119,8 @@ fn is_plausible_email(value: &str) -> bool {
 /// One line of the reference file: one person who must exist in WordPress.
 #[derive(Debug, Clone)]
 pub struct Identity {
-    /// 1-based line number in the reference file.
+    /// 1-based line number in the reference file; 0 when the identity does not
+    /// come from a file (see `Identity::ad_hoc`).
     pub line: usize,
     /// The address as listed; the one used if the account has to be created.
     pub email: Email,
@@ -128,6 +129,18 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// An identity given on the command line rather than read from the
+    /// reference file. It is resolved through the alias map like any other,
+    /// so it matches an account registered under one of its aliases.
+    pub fn ad_hoc(email: Email, aliases: &AliasMap) -> Self {
+        let class = aliases.class_of(email.key()).to_string();
+        Self {
+            line: 0,
+            email,
+            class,
+        }
+    }
+
     pub fn email(&self) -> &Email {
         &self.email
     }
@@ -288,6 +301,21 @@ mod tests {
         };
         let identities = parse("alice+wp@example.com\n", &normalizer, &no_aliases()).unwrap();
         assert_eq!(identities[0].class, "alice@example.com");
+    }
+
+    #[test]
+    fn an_ad_hoc_identity_resolves_through_the_alias_map() {
+        let aliases = alias_map("new@example.com old@legacy.com\n");
+        let normalizer = Normalizer::default();
+        let email = Email::new("Old@Legacy.com", &normalizer).unwrap();
+
+        let identity = Identity::ad_hoc(email, &aliases);
+
+        assert_eq!(identity.line, 0);
+        // The account is created with the address as typed...
+        assert_eq!(identity.email().raw(), "Old@Legacy.com");
+        // ...but the person is identified by the group's canonical key.
+        assert_eq!(identity.class, "new@example.com");
     }
 
     #[test]

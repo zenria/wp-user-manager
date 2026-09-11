@@ -70,6 +70,7 @@ file lists the new or the old address.
 | `list-missing` | Identities with no WordPress account |
 | `list-extra` | WordPress users absent from the reference file |
 | `create-missing` | Creates the missing users, after confirmation |
+| `create-user <EMAIL>` | Creates a single user from one address, after confirmation |
 | `delete-extra` | Deletes the surplus users, after confirmation |
 | `sync` | `create-missing` then `delete-extra`, each confirmed separately |
 
@@ -77,13 +78,22 @@ file lists the new or the old address.
 wp-user-manager list-aliases
 wp-user-manager status
 wp-user-manager create-missing --role subscriber
+wp-user-manager create-user jane.doe@example.com --role subscriber
 wp-user-manager delete-extra --reassign 1
 ```
 
+`create-user` does not need a reference file: the address on the command line
+says who to create. It still resolves the address through the alias file, so
+an account already registered under another address of the same person is
+found and nothing is created. When a reference file *is* configured and does
+not list the address, the command warns: the reference file remains the source
+of truth, and `delete-extra` would otherwise propose the new account for
+deletion.
+
 ## Safety
 
-- Read-only commands never modify anything; `create-missing`, `delete-extra`
-  and `sync` prompt before writing, and `delete-extra` requires the word
+- Read-only commands never modify anything; `create-missing`, `create-user`,
+  `delete-extra` and `sync` prompt before writing, and `delete-extra` requires the word
   `delete` to be typed.
 - The account used to authenticate is never deleted.
 - Administrators absent from the reference file are kept, unless

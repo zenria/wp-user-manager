@@ -103,6 +103,9 @@ pub enum Command {
     /// Create the missing users, after confirmation
     CreateMissing(CreateArgs),
 
+    /// Create a single user from an e-mail address, after confirmation
+    CreateUser(CreateUserArgs),
+
     /// Delete the surplus users, after confirmation
     DeleteExtra(DeleteArgs),
 
@@ -119,6 +122,16 @@ pub struct CreateArgs {
     /// Print the generated passwords instead of hiding them
     #[arg(long)]
     pub show_passwords: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CreateUserArgs {
+    /// E-mail address of the user to create; the account is created with this
+    /// address, even when the alias file knows other ones for the same person
+    pub email: String,
+
+    #[command(flatten)]
+    pub create: CreateArgs,
 }
 
 #[derive(Debug, Args)]
